@@ -3,11 +3,28 @@ import java.util.*;
 import java.util.function.Function;
 
 public class Solution {
-
+	private static final Base64Encoder base64Encoder = new Base64Encoder();
 	private static final Base64Decoder base64Decoder = new Base64Decoder();
 
 	public static void main(String[] args) {
-		System.out.println(base64Decoder.decodePacket("OAL_fwQCAghTRU5TT1IwMQ8EDGQGT1RIRVIxD7AJBk9USEVSMgCsjQYGT1RIRVIzCAAGT1RIRVI09w"));
+		log("BQECBQIDew");
+	}
+
+	//TODO некорректно работает декодирования
+	private static void log(String str) {
+		System.out.println("Input - " + str);
+		final Packet packet = base64Decoder.decodePacket(str);
+		System.out.println("Packet - " + packet);
+		final String encoded = base64Encoder.encode(packet);
+		System.out.println("Encoded - " + encoded);
+	}
+}
+
+final class Base64Encoder {
+	private static final Base64.Encoder encoder = Base64.getUrlEncoder();
+
+	public <T extends Encodable> String encode(T object) {
+		return new String(encoder.encode(object.encode()), StandardCharsets.UTF_8);
 	}
 }
 
@@ -45,8 +62,7 @@ final class Base64Decoder {
 
 	private CmdBody decodeCmdBody(byte[] bytes, DevType dev_type, Cmd cmd) {
 		switch (cmd) {
-			case WHOISHERE:
-			case IAMHERE: {
+			case WHOISHERE, IAMHERE -> {
 				if (dev_type == DevType.EnvSensor) {
 					return decodeCmdBodyWhereForSensor(bytes);
 				} else if (dev_type == DevType.Switch) {
@@ -55,19 +71,27 @@ final class Base64Decoder {
 					return new CBOnlyDevName(new TString(bytes));
 				}
 			}
-			case STATUS: {
+			case STATUS -> {
 				if (dev_type == DevType.EnvSensor) {
-					//todo
+					return new CBValues(new TArray<>(bytes, byteArray -> {
+						final Varuint varuint = new Varuint(byteArray);
+						return new Pair<>(varuint, varuint.countBytes());
+					}));
 				} else if (dev_type == DevType.Switch || dev_type == DevType.Lamp || dev_type == DevType.Socket) {
-					//todo
+					return new CBValue(new TByte(bytes[0]));
 				} else {
 					return CmdBody.EMPTY;
 				}
 			}
-			case TICK:
+			case SETSTATUS -> {
+				return new CBValue(new TByte(bytes[0]));
+			}
+			case TICK -> {
 				return new CBTick(new Varuint(bytes));
-			default:
+			}
+			default -> {
 				return CmdBody.EMPTY;
+			}
 		}
 	}
 
@@ -93,7 +117,7 @@ final class Base64Decoder {
 				index += name.countBytes();
 
 				return new Pair<>(new Trigger(op, value, name), index);
-		});
+			});
 
 		return new CBSensorWhere(dev_name, new DP(sensors, triggers));
 	}
@@ -119,61 +143,168 @@ final class Base64Decoder {
 	}
 }
 
-record Packet(TByte length, Payload payload, TByte crc8) {
+interface Encodable {
+	byte[] encode();
 }
 
-record Payload(Varuint src, Varuint dst, Varuint serial, DevType dev_type, Cmd cmd, CmdBody cmd_body) {
+record Packet(TByte length, Payload payload, TByte crc8) implements Encodable {
+	@Override
+	public byte[] encode() {
+		final byte[] bLength = length.encode();
+		final byte[] bPayload = payload.encode();
+		final byte[] bCrc8 = crc8.encode();
+
+		final byte[] bytes = new byte[bLength.length + bPayload.length + bCrc8.length];
+		int index = 0;
+
+		index = Utils.concatBytes(bytes, bLength, index);
+		index = Utils.concatBytes(bytes, bPayload, index);
+		Utils.concatBytes(bytes, bCrc8, index);
+
+		return bytes;
+	}
 }
 
-interface CmdBody {
+record Payload(Varuint src, Varuint dst, Varuint serial, DevType dev_type, Cmd cmd, CmdBody cmd_body)
+	implements Encodable {
+	@Override
+	public byte[] encode() {
+		final byte[] bSrc = src.encode();
+		final byte[] bDst = dst.encode();
+		final byte[] bSerial = serial.encode();
+		final byte[] bDetType = dev_type.encode();
+		final byte[] bCmd = cmd.encode();
+		final byte[] bCmdBody = cmd_body.encode();
+
+		final int length = bSrc.length + bDst.length + bSerial.length + bDetType.length + bCmd.length + bCmdBody.length;
+		final byte[] bytes = new byte[length];
+		int index = 0;
+
+		index = Utils.concatBytes(bytes, bSrc, index);
+		index = Utils.concatBytes(bytes, bDst, index);
+		index = Utils.concatBytes(bytes, bSerial, index);
+		index = Utils.concatBytes(bytes, bDetType, index);
+		index = Utils.concatBytes(bytes, bCmd, index);
+		Utils.concatBytes(bytes, bCmdBody, index);
+
+		return bytes;
+	}
+}
+
+interface CmdBody extends Encodable {
 	CmdBody EMPTY = new CBEmpty();
 }
 
 record CBEmpty() implements CmdBody {
+	@Override
+	public byte[] encode() {
+		return new byte[0];
+	}
 }
 
 record CBTick(Varuint timestamp) implements CmdBody {
+	@Override
+	public byte[] encode() {
+		return timestamp.encode();
+	}
 }
 
 record CBOnlyDevName(TString dev_name) implements CmdBody {
+	@Override
+	public byte[] encode() {
+		return dev_name.encode();
+	}
 }
 
 record CBSensorWhere(TString dev_name, DP dev_props) implements CmdBody {
+	@Override
+	public byte[] encode() {
+		final byte[] bDevName = dev_name.encode();
+		final byte[] bDevProps = dev_props.encode();
+
+		final byte[] bytes = new byte[bDevName.length + bDevProps.length];
+		int index = Utils.concatBytes(bytes, bDevName, 0);
+		Utils.concatBytes(bytes, bDevProps, index);
+
+		return bytes;
+	}
 }
 
-record CBSwitchWhere(TString dev_name, DPNameList dev_ames) implements CmdBody {
+record CBSwitchWhere(TString dev_name, DPNameList dev_names) implements CmdBody {
+	@Override
+	public byte[] encode() {
+		final byte[] bDevName = dev_name.encode();
+		final byte[] bDevNames = dev_names.encode();
+
+		final byte[] bytes = new byte[bDevName.length + bDevNames.length];
+		int index = Utils.concatBytes(bytes, bDevName, 0);
+		Utils.concatBytes(bytes, bDevNames, index);
+
+		return bytes;
+	}
 }
 
 record CBValue(TByte value) implements CmdBody {
+	@Override
+	public byte[] encode() {
+		return value.encode();
+	}
 }
 
-record CBValueList(List<Varuint> values) implements CmdBody {
+record CBValues(TArray<Varuint> values) implements CmdBody {
+	@Override
+	public byte[] encode() {
+		return values.encode();
+	}
 }
 
-record DP(TByte sensors, TArray<Trigger> triggers) {
+record DP(TByte sensors, TArray<Trigger> triggers) implements Encodable {
+	@Override
+	public byte[] encode() {
+		final byte[] bSensors = sensors.encode();
+		final byte[] bTriggers = triggers.encode();
+
+		final byte[] bytes = new byte[bSensors.length + bTriggers.length];
+		int index = Utils.concatBytes(bytes, bSensors, 0);
+		Utils.concatBytes(bytes, bTriggers, index);
+
+		return bytes;
+	}
 }
 
-record Trigger(TByte op, Varuint value, TString name) {
+record Trigger(TByte op, Varuint value, TString name) implements Encodable {
+	@Override
+	public byte[] encode() {
+		final byte[] bOp = op.encode();
+		final byte[] bValue = value.encode();
+		final byte[] bName = name.encode();
+
+		final byte[] bytes = new byte[bOp.length + bValue.length + bName.length];
+		int index = Utils.concatBytes(bytes, bOp, 0);
+		index = Utils.concatBytes(bytes, bValue, index);
+		Utils.concatBytes(bytes, bName, index);
+
+		return bytes;
+	}
 }
 
-record DPNameList(TArray<TString> dev_names) {
+record DPNameList(TArray<TString> dev_names) implements Encodable {
+	@Override
+	public byte[] encode() {
+		return dev_names.encode();
+	}
 }
 
 
-interface Type<T> {
+interface Type<T> extends Encodable {
 	T val();
 }
 
 interface BigType<T> extends Type<T> {
-	byte[] encode();
 	int countBytes();
 }
 
-interface LittleType<T> extends Type<T> {
-	byte encode();
-}
-
-final class TByte implements LittleType<Integer> {
+final class TByte implements Type<Integer> {
 	private final Integer value;
 
 	TByte(byte b) {
@@ -186,8 +317,8 @@ final class TByte implements LittleType<Integer> {
 	}
 
 	@Override
-	public byte encode() {
-		return value.byteValue();
+	public byte[] encode() {
+		return new byte[]{value.byteValue()};
 	}
 
 	@Override
@@ -295,7 +426,7 @@ final class Varuint implements BigType<Long> {
 	}
 }
 
-final class TArray<T> implements BigType<T> {
+final class TArray<T extends Encodable> implements BigType<T> {
 	private final List<T> list;
 	private final int countBytes;
 
@@ -325,7 +456,16 @@ final class TArray<T> implements BigType<T> {
 
 	@Override
 	public byte[] encode() {
-		return null; //TODO
+		final byte[] size = new byte[]{Integer.valueOf(countBytes - 1).byteValue()};
+		final List<byte[]> objects = list.stream().map(Encodable::encode).toList();
+
+		final byte[] bytes = new byte[objects.stream().mapToInt(arr -> arr.length).sum()];
+
+		int index = Utils.concatBytes(bytes, size, 0);
+		for (byte[] arr : objects) {
+			index = Utils.concatBytes(bytes, arr, index);
+		}
+		return bytes;
 	}
 
 	@Override
@@ -339,7 +479,7 @@ final class TArray<T> implements BigType<T> {
 	}
 }
 
-enum Cmd {
+enum Cmd implements Encodable {
 	WHOISHERE(0x01),
 	IAMHERE(0x02),
 	GETSTATUS(0x03),
@@ -353,9 +493,14 @@ enum Cmd {
 	public static Cmd of(int b) {
 		return values()[b - 1];
 	}
+
+	@Override
+	public byte[] encode() {
+		return new byte[]{Integer.valueOf(ordinal()).byteValue()};
+	}
 }
 
-enum DevType {
+enum DevType implements Encodable {
 	SmartHub(0x01),
 	EnvSensor(0x02),
 	Switch(0x03),
@@ -369,8 +514,22 @@ enum DevType {
 	public static DevType of(int b) {
 		return values()[b - 1];
 	}
+
+	@Override
+	public byte[] encode() {
+		return new byte[]{Integer.valueOf(ordinal()).byteValue()};
+	}
 }
 
 
 record Pair<T, U>(T left, U right) {
+}
+
+final class Utils {
+	public static int concatBytes(byte[] src, byte[] dst, int index) {
+		for (int i = 0; i < dst.length; i++, index++) {
+			src[index] = dst[i];
+		}
+		return index;
+	}
 }
